@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Merkle Seal, tamper detection for a set of files</title>
+<meta name="description" content="Hash a set of files into a Merkle root, then verify later which specific file changed. Runs entirely in the browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..800&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23e85a30'/><path d='M32 14 L46 40 L18 40 Z' fill='%230c0c0d'/></svg>">
+<style>
+:root{
+  --bg:#0c0c0d; --lift:#131313; --text:#fafaf9; --muted:#a8a29e;
+  --line:rgba(250,250,249,0.10); --line-soft:rgba(250,250,249,0.055);
+  --accent:#e85a30; --accent-quiet:rgba(232,90,48,0.14);
+  --ok:#4ade80; --bad:#f87171;
+  --sans:'Geist',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'Geist Mono',ui-monospace,'SF Mono',Consolas,monospace;
+  --r-sm:6px; --r-md:12px;
+}
+*,*::before,*::after{box-sizing:border-box;}
+html,body,h1,h2,h3,p,ul,li,figure{margin:0;padding:0;}
+ul{list-style:none;}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--sans);
+  font-size:1rem; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--accent); color:#0c0c0d;}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:2px;}
+*{scrollbar-width:thin; scrollbar-color:#33302d var(--bg);}
+::-webkit-scrollbar{width:11px; height:11px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:#33302d; border:3px solid var(--bg); border-radius:99px;}
+a{color:var(--accent); text-underline-offset:0.22em;}
+.wrap{max-width:1000px; margin-inline:auto; padding-inline:clamp(20px,5vw,48px);}
+
+header{border-bottom:1px solid var(--line-soft); padding-block:20px; margin-bottom:clamp(36px,6vw,64px);}
+.head-in{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;}
+.brand{font-weight:600; letter-spacing:-0.02em;}
+.brand span{color:var(--accent);}
+header a{font-size:0.9375rem; color:var(--muted); text-decoration:none;}
+header a:hover{color:var(--text);}
+
+h1{font-size:clamp(1.9rem,4.6vw,3rem); font-weight:600; letter-spacing:-0.035em; line-height:1.05; margin-bottom:16px;}
+.lede{color:var(--muted); max-width:64ch; margin-bottom:14px;}
+.note{font-size:0.875rem; color:var(--muted); max-width:64ch;}
+.note b{color:var(--text); font-weight:500;}
+
+.modes{display:flex; gap:8px; margin:34px 0 20px;}
+.mode{
+  font:inherit; font-size:0.9375rem; font-weight:500; color:var(--muted);
+  background:none; border:1px solid var(--line); border-radius:var(--r-sm);
+  padding:9px 18px; cursor:pointer; transition:all .2s ease;
+}
+.mode:hover{color:var(--text); border-color:var(--accent);}
+.mode[aria-selected="true"]{background:var(--accent); border-color:var(--accent); color:#0c0c0d; font-weight:600;}
+
+.drop{
+  border:1.5px dashed var(--line); border-radius:var(--r-md);
+  padding:clamp(30px,6vw,56px) 24px; text-align:center;
+  background:var(--lift); transition:border-color .2s ease, background-color .2s ease;
+  cursor:pointer;
+}
+.drop:hover,.drop.over{border-color:var(--accent); background:var(--accent-quiet);}
+.drop h2{font-size:1.0625rem; font-weight:500; margin-bottom:6px;}
+.drop p{font-size:0.875rem; color:var(--muted);}
+.drop input{display:none;}
+
+.root-card{
+  margin-top:28px; padding:22px; border:1px solid var(--line); border-radius:var(--r-md);
+  background:var(--lift);
+}
+.root-card .k{font-size:0.8125rem; color:var(--muted); margin-bottom:8px;}
+.root-hash{
+  font-family:var(--mono); font-size:clamp(0.8rem,2.1vw,1.05rem); font-weight:500;
+  color:var(--accent); word-break:break-all; line-height:1.5;
+}
+.actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:18px;}
+.btn{
+  font:inherit; font-size:0.9375rem; font-weight:500;
+  border-radius:var(--r-sm); padding:10px 18px; cursor:pointer;
+  border:1px solid var(--line); background:none; color:var(--text);
+  transition:all .2s ease;
+}
+.btn:hover{border-color:var(--accent); background:var(--accent-quiet);}
+.btn-solid{background:var(--accent); border-color:var(--accent); color:#0c0c0d; font-weight:600;}
+.btn-solid:hover{background:#f2683e;}
+
+table{width:100%; border-collapse:collapse; margin-top:30px; font-size:0.9375rem;}
+caption{text-align:left; font-weight:600; letter-spacing:-0.02em; font-size:1.0625rem; margin-bottom:14px;}
+th{
+  text-align:left; font-size:0.8125rem; font-weight:500; color:var(--muted);
+  padding:0 12px 10px 0; border-bottom:1px solid var(--line);
+}
+td{padding:12px 12px 12px 0; border-bottom:1px solid var(--line-soft); vertical-align:top;}
+td.name{font-weight:500; word-break:break-word;}
+td.hash{font-family:var(--mono); font-size:0.8125rem; color:var(--muted); word-break:break-all;}
+td.size{color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap;}
+.pill{
+  display:inline-block; font-size:0.75rem; font-weight:600; letter-spacing:0.02em;
+  padding:3px 9px; border-radius:99px; white-space:nowrap;
+}
+.pill.ok{color:var(--ok); background:rgba(74,222,128,0.12); border:1px solid rgba(74,222,128,0.3);}
+.pill.bad{color:var(--bad); background:rgba(248,113,113,0.12); border:1px solid rgba(248,113,113,0.3);}
+.pill.gone{color:var(--muted); background:rgba(168,162,158,0.1); border:1px solid var(--line);}
+
+.verdict{margin-top:28px; padding:20px 22px; border-radius:var(--r-md); border:1px solid;}
+.verdict.ok{border-color:rgba(74,222,128,0.35); background:rgba(74,222,128,0.07);}
+.verdict.bad{border-color:rgba(248,113,113,0.35); background:rgba(248,113,113,0.07);}
+.verdict h3{font-size:1.0625rem; font-weight:600; letter-spacing:-0.02em; margin-bottom:6px;}
+.verdict.ok h3{color:var(--ok);} .verdict.bad h3{color:var(--bad);}
+.verdict p{font-size:0.9375rem; color:var(--muted);}
+
+.tree{margin-top:34px; overflow-x:auto; padding-bottom:8px;}
+.tree h3{font-size:1.0625rem; font-weight:600; letter-spacing:-0.02em; margin-bottom:4px;}
+.tree .cap{font-size:0.875rem; color:var(--muted); margin-bottom:16px;}
+.lvl{display:flex; gap:8px; justify-content:center; margin-bottom:8px; min-width:min-content;}
+.cell{
+  font-family:var(--mono); font-size:0.6875rem; color:var(--muted);
+  border:1px solid var(--line); border-radius:4px; padding:6px 8px;
+  background:var(--lift); white-space:nowrap;
+}
+.cell.root{color:var(--accent); border-color:var(--accent); font-weight:600;}
+.cell.dirty{color:var(--bad); border-color:rgba(248,113,113,0.5);}
+.cell.proof{border-color:var(--accent); color:var(--text);}
+
+footer{margin-top:clamp(48px,8vw,88px); padding-block:28px 56px; border-top:1px solid var(--line-soft); font-size:0.875rem; color:var(--muted);}
+.hidden{display:none !important;}
+.busy{font-size:0.9375rem; color:var(--muted); margin-top:20px;}
+
+@media (prefers-reduced-motion: reduce){ *{transition-duration:.01ms !important;} }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <div class="head-in">
+    <span class="brand">Merkle<span>.</span>Seal</span>
+    <a href="https://shamith-s-poojari.github.io">Shamith S Poojari</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <h1>Prove a set of files has not changed</h1>
+  <p class="lede">
+    Hash a folder of files into a single Merkle root. Later, check the same files against
+    that root: if anything changed, this tells you exactly which file, and shows the
+    cryptographic path that proves it.
+  </p>
+  <p class="note">
+    <b>Nothing leaves your machine.</b> Files are read and hashed locally with the Web Crypto
+    API. There is no server, no upload, and no analytics.
+  </p>
+
+  <div class="modes" role="tablist">
+    <button class="mode" role="tab" id="tabSeal" aria-selected="true">Seal</button>
+    <button class="mode" role="tab" id="tabVerify" aria-selected="false">Verify</button>
+  </div>
+
+  <div id="paneSeal">
+    <label class="drop" id="dropSeal">
+      <input type="file" id="filesSeal" multiple>
+      <h2>Drop files here, or click to choose</h2>
+      <p>They are hashed in your browser and never uploaded</p>
+    </label>
+  </div>
+
+  <div id="paneVerify" class="hidden">
+    <label class="drop" id="dropVerify">
+      <input type="file" id="filesVerify" multiple>
+      <h2>Drop the manifest and the files together</h2>
+      <p>Include the <code>seal.json</code> you downloaded, plus the files to check</p>
+    </label>
+  </div>
+
+  <p class="busy hidden" id="busy">Hashing…</p>
+  <div id="out"></div>
+</main>
+
+<footer class="wrap">
+  Built by Shamith S Poojari. SHA-256 via the Web Crypto API, no dependencies.
+  <a href="https://github.com/shamith-s-poojari/merkle-seal">Source</a>
+</footer>
+
+<script type="module">
+import { sha256, toHex, fromHex, leafHash, buildTree, proofFor, verifyProof } from './merkle.js';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out'), busy = $('busy');
+let mode = 'seal';
+
+/* ---------- mode switching ---------- */
+function setMode(next) {
+  mode = next;
+  $('tabSeal').setAttribute('aria-selected', String(next === 'seal'));
+  $('tabVerify').setAttribute('aria-selected', String(next === 'verify'));
+  $('paneSeal').classList.toggle('hidden', next !== 'seal');
+  $('paneVerify').classList.toggle('hidden', next !== 'verify');
+  out.innerHTML = '';
+}
+$('tabSeal').addEventListener('click', () => setMode('seal'));
+$('tabVerify').addEventListener('click', () => setMode('verify'));
+
+/* ---------- drag and drop ---------- */
+for (const [zone, input] of [[$('dropSeal'), $('filesSeal')], [$('dropVerify'), $('filesVerify')]]) {
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('over');
+    handle([...e.dataTransfer.files]);
+  });
+  input.addEventListener('change', () => handle([...input.files]));
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const short = (h) => h.slice(0, 8) + '…' + h.slice(-6);
+const kb = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+
+/* Files are sorted by name so the root depends on the set, not on drop order. */
+const ordered = (files) => [...files].sort((a, b) => a.name.localeCompare(b.name));
+
+async function hashAll(files) {
+  const rows = [];
+  for (const f of files) {
+    const buf = await f.arrayBuffer();
+    const leaf = await leafHash(buf);
+    rows.push({ name: f.name, size: f.size, leaf, hex: toHex(leaf) });
+  }
+  return rows;
+}
+
+async function handle(dropped) {
+  if (!dropped.length) return;
+  busy.classList.remove('hidden');
+  out.innerHTML = '';
+  try {
+    if (mode === 'seal') await doSeal(ordered(dropped));
+    else await doVerify(dropped);
+  } catch (err) {
+    out.innerHTML = `<div class="verdict bad"><h3>Something went wrong</h3><p>${esc(err.message)}</p></div>`;
+  } finally {
+    busy.classList.add('hidden');
+  }
+}
+
+/* ---------- seal ---------- */
+let lastSeal = null;
+
+async function doSeal(files) {
+  const rows = await hashAll(files);
+  const { root, levels } = await buildTree(rows.map(r => r.leaf));
+  const rootHex = toHex(root);
+
+  lastSeal = {
+    version: 1,
+    algorithm: 'SHA-256',
+    domainSeparated: true,
+    createdAt: new Date().toISOString(),
+    root: rootHex,
+    files: rows.map((r, i) => ({ name: r.name, size: r.size, hash: r.hex, proof: proofFor(levels, i) }))
+  };
+
+  out.innerHTML = `
+    <div class="root-card">
+      <div class="k">Merkle root, ${rows.length} file${rows.length === 1 ? '' : 's'}</div>
+      <div class="root-hash">${rootHex}</div>
+      <div class="actions">
+        <button class="btn btn-solid" id="dl">Download seal.json</button>
+        <button class="btn" id="copy">Copy root</button>
+      </div>
+    </div>
+    ${tableFor(rows.map(r => ({ ...r, status: null })))}
+    ${treeFor(levels, new Set())}`;
+
+  $('dl').addEventListener('click', () => {
+    const blob = new Blob([JSON.stringify(lastSeal, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'seal.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+  $('copy').addEventListener('click', async (e) => {
+    try { await navigator.clipboard.writeText(rootHex); e.target.textContent = 'Copied'; }
+    catch { e.target.textContent = 'Copy failed'; }
+    setTimeout(() => { e.target.textContent = 'Copy root'; }, 1400);
+  });
+}
+
+/* ---------- verify ---------- */
+async function doVerify(dropped) {
+  const manifestFile = dropped.find(f => f.name.endsWith('.json'));
+  if (!manifestFile) throw new Error('No manifest found. Include the seal.json file along with the files to check.');
+
+  const manifest = JSON.parse(await manifestFile.text());
+  const subject = ordered(dropped.filter(f => f !== manifestFile));
+  if (!subject.length) throw new Error('Only the manifest was dropped. Add the files you want to check.');
+
+  const rows = await hashAll(subject);
+  const byName = new Map(rows.map(r => [r.name, r]));
+  const expected = new Map(manifest.files.map(f => [f.name, f]));
+
+  const results = [];
+  for (const exp of manifest.files) {
+    const got = byName.get(exp.name);
+    if (!got) results.push({ name: exp.name, size: exp.size, hex: exp.hash, status: 'missing' });
+    else results.push({ name: exp.name, size: got.size, hex: got.hex, status: got.hex === exp.hash ? 'ok' : 'changed' });
+  }
+  for (const r of rows) if (!expected.has(r.name)) results.push({ ...r, status: 'added' });
+
+  /* Recompute the root from what is actually on disk now. */
+  const present = results.filter(r => r.status === 'ok' || r.status === 'changed')
+                         .sort((a, b) => a.name.localeCompare(b.name));
+  const { root: newRoot, levels } = await buildTree(present.map(r => fromHex(r.hex)));
+  const newRootHex = newRoot ? toHex(newRoot) : '';
+  const intact = newRootHex === manifest.root &&
+                 !results.some(r => r.status === 'missing' || r.status === 'added');
+
+  /* Confirm one untouched file still proves against the original root. The proof
+     is what lets a verifier trust a single file without re-reading the whole set. */
+  let proofNote = '';
+  const clean = results.find(r => r.status === 'ok');
+  if (clean) {
+    const entry = expected.get(clean.name);
+    if (entry?.proof) {
+      const good = await verifyProof(fromHex(entry.hash), entry.proof, fromHex(manifest.root));
+      proofNote = good
+        ? `Inclusion proof for <b>${esc(clean.name)}</b> checks out against the sealed root, using ${entry.proof.length} sibling hash${entry.proof.length === 1 ? '' : 'es'} instead of rehashing every file.`
+        : `Inclusion proof for ${esc(clean.name)} did not validate.`;
+    }
+  }
+
+  const broken = results.filter(r => r.status !== 'ok');
+  const dirty = new Set(present.map((r, i) => r.status === 'changed' ? i : -1).filter(i => i >= 0));
+
+  out.innerHTML = `
+    <div class="verdict ${intact ? 'ok' : 'bad'}">
+      <h3>${intact ? 'Intact' : 'Tampered'}</h3>
+      <p>${intact
+        ? `All ${results.length} files match the sealed root.`
+        : `${broken.length} of ${results.length} file${results.length === 1 ? '' : 's'} did not match. The recomputed root differs from the one in the manifest.`}</p>
+    </div>
+    <div class="root-card">
+      <div class="k">Sealed root</div><div class="root-hash">${esc(manifest.root)}</div>
+      <div class="k" style="margin-top:16px">Recomputed now</div>
+      <div class="root-hash" style="color:${intact ? 'var(--ok)' : 'var(--bad)'}">${esc(newRootHex || 'nothing to hash')}</div>
+      ${proofNote ? `<p class="note" style="margin-top:16px">${proofNote}</p>` : ''}
+    </div>
+    ${tableFor(results)}
+    ${treeFor(levels, dirty)}`;
+}
+
+/* ---------- rendering ---------- */
+function tableFor(rows) {
+  const pill = (s) => s === 'ok' ? '<span class="pill ok">unchanged</span>'
+    : s === 'changed' ? '<span class="pill bad">changed</span>'
+    : s === 'missing' ? '<span class="pill gone">missing</span>'
+    : s === 'added' ? '<span class="pill bad">not sealed</span>' : '';
+  return `<table><caption>Files</caption><thead><tr>
+      <th>Name</th><th>Size</th><th>Leaf hash</th>${rows[0]?.status !== null ? '<th>Status</th>' : ''}
+    </tr></thead><tbody>${rows.map(r => `<tr>
+      <td class="name">${esc(r.name)}</td>
+      <td class="size">${kb(r.size)}</td>
+      <td class="hash">${esc(r.hex)}</td>
+      ${r.status !== null ? `<td>${pill(r.status)}</td>` : ''}
+    </tr>`).join('')}</tbody></table>`;
+}
+
+function treeFor(levels, dirty) {
+  if (!levels[0] || levels[0].length === 0) return '';
+  const rows = levels.map((nodes, i) => {
+    const isRoot = i === levels.length - 1 && nodes.length === 1;
+    return `<div class="lvl">${nodes.map((n, j) => {
+      const bad = i === 0 && dirty.has(j);
+      return `<span class="cell ${isRoot ? 'root' : ''} ${bad ? 'dirty' : ''}">${short(toHex(n))}</span>`;
+    }).join('')}</div>`;
+  }).reverse().join('');
+  return `<div class="tree"><h3>The tree</h3>
+    <p class="cap">Root on top, one leaf per file at the bottom. Changing any single file changes
+    every hash on the path from that leaf up to the root, which is why one root value is enough
+    to seal the whole set.</p>${rows}</div>`;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Merkle Seal, tests</title>
+<style>
+  body{background:#0c0c0d; color:#fafaf9; font-family:ui-monospace,'SF Mono',Consolas,monospace;
+       font-size:14px; line-height:1.8; padding:32px clamp(16px,5vw,48px); margin:0;}
+  h1{font-size:1.1rem; font-weight:600; margin:0 0 4px;}
+  .sub{color:#a8a29e; margin-bottom:24px;}
+  li{list-style:none;}
+  .pass::before{content:"PASS  "; color:#4ade80; font-weight:700;}
+  .fail::before{content:"FAIL  "; color:#f87171; font-weight:700;}
+  .why{color:#a8a29e; padding-left:6.2em; display:block; font-size:13px;}
+  #sum{margin-top:24px; padding-top:16px; border-top:1px solid rgba(250,250,249,.12); font-weight:700;}
+  .ok{color:#4ade80;} .bad{color:#f87171;}
+  a{color:#e85a30;}
+</style>
+</head>
+<body>
+<h1>Merkle Seal, tree tests</h1>
+<p class="sub">Runs in the browser against the real Web Crypto implementation. <a href="./">Back to the app</a></p>
+<ul id="list"></ul>
+<div id="sum">running…</div>
+
+<script type="module">
+import { sha256, toHex, leafHash, buildTree, proofFor, verifyProof } from './merkle.js';
+
+const list = document.getElementById('list');
+let pass = 0, fail = 0;
+
+function check(name, condition, why) {
+  const li = document.createElement('li');
+  li.className = condition ? 'pass' : 'fail';
+  li.textContent = name;
+  if (why) { const s = document.createElement('span'); s.className = 'why'; s.textContent = why; li.appendChild(s); }
+  list.appendChild(li);
+  condition ? pass++ : fail++;
+}
+
+const enc = new TextEncoder();
+const leaf = (s) => leafHash(enc.encode(s));
+const set = (...names) => Promise.all(names.map(leaf));
+
+/* 1. the same files always give the same root */
+const base = await set('alpha', 'beta', 'gamma', 'delta');
+const t1 = await buildTree(base);
+const t2 = await buildTree(await set('alpha', 'beta', 'gamma', 'delta'));
+check('root is deterministic', toHex(t1.root) === toHex(t2.root),
+      'same four files hashed twice produce the same root');
+
+/* 2. one changed byte changes the root */
+const edited = await buildTree(await set('alpha', 'beta', 'gamma', 'DELTA'));
+check('a changed file changes the root', toHex(t1.root) !== toHex(edited.root),
+      'editing one of four files gives a different root');
+
+/* 3. every leaf proves against the root */
+let all = true;
+for (let i = 0; i < base.length; i++) {
+  if (!await verifyProof(base[i], proofFor(t1.levels, i), t1.root)) all = false;
+}
+check('every leaf verifies via its inclusion proof', all,
+      'each file recomputes the root from only its sibling hashes');
+
+/* 4. a leaf that was never in the set must not verify */
+const forged = await leaf('never-sealed');
+check('a forged leaf is rejected',
+      !await verifyProof(forged, proofFor(t1.levels, 0), t1.root),
+      'a file outside the set cannot borrow another file’s proof');
+
+/* 5. CVE-2012-2459: promoting an odd node must not collide with duplicating it */
+const three = await set('a', 'b', 'c');
+const odd = await buildTree(three);
+const duplicated = await buildTree([...three, three[2]]);
+check('odd node is promoted, not duplicated',
+      toHex(odd.root) !== toHex(duplicated.root),
+      'three files and three-plus-a-repeat give different roots (CVE-2012-2459)');
+
+let oddOk = true;
+for (let i = 0; i < three.length; i++) {
+  if (!await verifyProof(three[i], proofFor(odd.levels, i), odd.root)) oddOk = false;
+}
+check('proofs still work with an odd leaf count', oddOk,
+      'the promoted node has a shorter path and still validates');
+
+/* 6. leaves and internal nodes live in different domains */
+check('leaf hashing is domain separated',
+      toHex(await leaf('alpha')) !== toHex(await sha256(enc.encode('alpha'))),
+      'a leaf hash is not a bare SHA-256 of the file, so it cannot pose as a node');
+
+/* 7. edges */
+const solo = await buildTree([await leaf('solo')]);
+check('a single file is its own root', toHex(solo.root) === toHex(await leaf('solo')));
+check('an empty set does not throw', (await buildTree([])).root === null);
+
+/* 8. order independence, since the app sorts by name */
+const forward = await buildTree(await set('a', 'b', 'c', 'd'));
+const sortedAgain = await buildTree(await set(...['d', 'c', 'b', 'a'].sort()));
+check('sorting makes the root order independent',
+      toHex(forward.root) === toHex(sortedAgain.root),
+      'dropping the same files in a different order still seals the same root');
+
+const sum = document.getElementById('sum');
+sum.textContent = `${pass} passed, ${fail} failed`;
+sum.className = fail === 0 ? 'ok' : 'bad';
+</script>
+</body>
+</html>
