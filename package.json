@@ -1,0 +1,15 @@
+{
+  "name": "merkle-seal",
+  "version": "2.0.0",
+  "description": "Seal a set of files under one Merkle root, then see exactly which file changed. Runs in the browser.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/run.test.js",
+    "start": "npx --yes serve@14 ."
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
