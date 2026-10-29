@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- No network access at all once the page has loaded: files cannot leave the browser. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
 <meta name="color-scheme" content="dark">
 <title>Merkle Seal</title>
 <meta name="description" content="Seal a set of files under one Merkle root, then see exactly which file changed, was added or was removed. Runs entirely in the browser.">
@@ -26,14 +26,14 @@
   <p class="prompt">merkle-seal --help</p>
   <h1>Seal a set of files. Later, see exactly which one changed.</h1>
   <p class="lede">
-    Every file is hashed into a Merkle tree, and the whole set is sealed by one 32-byte root.
-    Check the files against that seal later and each one is verified on its own, through its
-    inclusion proof, so a change is pinned to the file that caused it.
+    Every file becomes a leaf of a Merkle tree and one 32-byte root seals the set. Each file
+    carries its own inclusion proof, so verification pins a change to the file that caused it,
+    and the root can be signed to prove who sealed it.
   </p>
   <ul class="facts">
-    <li>SHA-256 via Web Crypto</li>
+    <li>SHA-256 + ECDSA P-256 via Web Crypto</li>
     <li>domain-separated leaves and nodes</li>
-    <li>an inclusion proof per file</li>
+    <li>parallel hashing in Web Workers</li>
     <li>no uploads: the page blocks all network requests</li>
   </ul>
 
@@ -41,17 +41,16 @@
     <button role="tab" id="tab-seal" aria-controls="pane-seal" aria-selected="true">1 · seal</button>
     <button role="tab" id="tab-verify" aria-controls="pane-verify" aria-selected="false" tabindex="-1">2 · verify</button>
     <button role="tab" id="tab-one" aria-controls="pane-one" aria-selected="false" tabindex="-1">3 · one file</button>
+    <button role="tab" id="tab-lab" aria-controls="pane-lab" aria-selected="false" tabindex="-1">4 · attack lab</button>
   </div>
 
   <section id="pane-seal" role="tabpanel" aria-labelledby="tab-seal">
-    <p class="pane-intro">Drop the files to seal. You get the root and a <code>seal.json</code> holding every file's hash and proof. Keep the seal somewhere the files themselves cannot reach.</p>
-    <div class="drop" data-drop="seal">
-      <p class="drop-title">Drop files or a folder here</p>
-      <p class="drop-sub">or <button type="button" class="link" data-pick="seal-files">choose files</button> · <button type="button" class="link" data-pick="seal-folder">choose a folder</button></p>
+    <div class="drop drop-compact" data-drop="seal">
+      <p class="drop-title">Drop files or a folder to seal</p>
+      <p class="drop-sub">or <button type="button" class="link" data-pick="seal-files">choose files</button> · <button type="button" class="link" data-pick="seal-folder">choose a folder</button> · <button type="button" class="link" id="demo">reseal the demo</button></p>
       <input type="file" id="seal-files" multiple hidden>
       <input type="file" id="seal-folder" webkitdirectory hidden>
     </div>
-    <p class="demo">No files handy? <button type="button" class="link" id="demo">Run the demo</button> on six sample files.</p>
     <p class="status" id="seal-status" aria-live="polite"></p>
     <div id="seal-out"></div>
   </section>
@@ -103,6 +102,11 @@
     </label>
     <p class="status" id="one-status" aria-live="polite"></p>
     <div id="one-out"></div>
+  </section>
+
+  <section id="pane-lab" role="tabpanel" aria-labelledby="tab-lab" hidden>
+    <p class="pane-intro">Two well-known ways to forge a Merkle root. Each one runs for real in your browser, first against a deliberately weakened tree and then against the tree Merkle Seal uses. Switch the defence on and off to compare.</p>
+    <div id="lab-out"></div>
   </section>
 </main>
 

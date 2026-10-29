@@ -2,17 +2,19 @@
  * Seals, proofs and verification on top of the Merkle tree in merkle.js.
  *
  * A seal is a JSON manifest: the root, plus for every file its path, size, content
- * hash, leaf hash and inclusion proof. Nothing in this module touches the DOM, so the
- * same code runs in the app and under `node --test`.
+ * hash, leaf hash and inclusion proof, and optionally a signature over the root.
+ * Nothing in this module touches the DOM, so the same code runs in the app and under
+ * `node --test`.
  *
- * Files come in as { path, bytes } or { path, read() } where read() resolves to an
- * ArrayBuffer, so the app can hash one file at a time instead of loading them all.
+ * Files come in as { path, bytes } or { path, size, read() } where read() resolves to
+ * an ArrayBuffer, so a large set never has to be in memory all at once.
  */
 
 import {
   sha256, toHex, isHash, normalizePath, comparePaths,
   leafHash, buildTree, proofFor, isProof, foldProof, verifyProof,
 } from './merkle.js';
+import { isSignature, checkSignature, signRoot } from './sign.js';
 
 export const FORMAT = 'merkle-seal';
 export const PROOF_FORMAT = 'merkle-seal-proof';
@@ -36,32 +38,51 @@ export class SealError extends Error {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+/** Hash one file's content on this thread. Returns { digest, size }. */
+export async function hashInline(entry) {
+  const bytes = entry.bytes ?? await entry.read();
+  return { digest: await sha256(bytes), size: bytes.byteLength };
+}
+
 /**
  * Hash every file and return rows sorted by path:
  * { path, size, contentHash (hex), leaf (bytes) }.
  * Sorting makes the root depend on the set of files, not on the order they arrived.
+ *
+ * `hashContent(entry)` does the content hashing (the app passes a Web Worker pool),
+ * and at most `concurrency` files are in flight at once, which bounds memory.
+ * onProgress(done, total, bytesDone) fires as each file finishes.
  */
-export async function hashEntries(entries, onProgress) {
-  const rows = [];
+export async function hashEntries(entries, { onProgress, hashContent = hashInline, concurrency = 4 } = {}) {
+  const paths = entries.map(e => normalizePath(e.path));
   const seen = new Set();
-  let done = 0;
-  for (const entry of entries) {
-    const path = normalizePath(entry.path);
+  for (const path of paths) {
     if (seen.has(path)) throw new SealError(`"${path}" appears twice. Every file in a seal needs a unique path.`);
     seen.add(path);
-
-    const bytes = entry.bytes ?? await entry.read();
-    const content = await sha256(bytes);
-    rows.push({ path, size: bytes.byteLength, contentHash: toHex(content), leaf: await leafHash(path, content) });
-    onProgress?.(++done, entries.length);
   }
+
+  const rows = new Array(entries.length);
+  let next = 0, done = 0, bytesDone = 0;
+  const lane = async () => {
+    while (next < entries.length) {
+      const i = next++;
+      const { digest, size } = await hashContent(entries[i]);
+      rows[i] = { path: paths[i], size, contentHash: toHex(digest), leaf: await leafHash(paths[i], digest) };
+      bytesDone += size;
+      onProgress?.(++done, entries.length, bytesDone);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, lane));
   return rows.sort((a, b) => comparePaths(a.path, b.path));
 }
 
-/** Seal a set of files. Returns { manifest, levels }. */
-export async function createSeal(entries, { createdAt = new Date(), onProgress } = {}) {
+/**
+ * Seal a set of files. Returns { manifest, levels }.
+ * Pass `signer` ({ privateKey, publicJwk } from sign.js) to sign the root as well.
+ */
+export async function createSeal(entries, { createdAt = new Date(), signer, ...hashing } = {}) {
   if (!entries.length) throw new SealError('There is nothing to seal. Add at least one file.');
-  const rows = await hashEntries(entries, onProgress);
+  const rows = await hashEntries(entries, hashing);
   const { root, levels } = await buildTree(rows.map(r => r.leaf));
 
   const manifest = {
@@ -78,7 +99,18 @@ export async function createSeal(entries, { createdAt = new Date(), onProgress }
       proof: proofFor(levels, i),
     })),
   };
-  return { manifest, levels };
+  return { manifest: signer ? await signSeal(manifest, signer) : manifest, levels };
+}
+
+/** A copy of the seal with a signature over its root and time. Replaces any old one. */
+export async function signSeal(manifest, signer) {
+  return { ...manifest, signature: await signRoot(manifest, signer) };
+}
+
+/** A copy of the seal without its signature. */
+export function unsignSeal(manifest) {
+  const { signature, ...rest } = manifest;
+  return rest;
 }
 
 function parseJson(input, what) {
@@ -126,12 +158,14 @@ export function parseSeal(input) {
   for (let i = 1; i < files.length; i++) {
     if (comparePaths(files[i - 1].path, files[i].path) >= 0) throw new SealError('The files in the seal are not in canonical order.');
   }
+  if (m.signature !== undefined && !isSignature(m.signature)) throw new SealError('The seal has a malformed signature.');
 
   return {
     format: FORMAT, version: VERSION, scheme: { ...SCHEME },
     createdAt: typeof m.createdAt === 'string' ? m.createdAt : null,
     root: m.root.toLowerCase(),
     files,
+    ...(m.signature ? { signature: m.signature } : {}),
   };
 }
 
@@ -173,15 +207,22 @@ export async function auditSeal(manifest) {
  *   missing    the seal names it but it was not supplied
  *   added      supplied but not in the seal
  *   renamed    an added file whose content matches a missing one
+ *
+ * A signed seal must carry a valid signature; `signature` in the result says who
+ * signed it (as a key fingerprint), or that it was not signed.
  */
-export async function verifySet(input, entries, { onProgress } = {}) {
+export async function verifySet(input, entries, hashing = {}) {
   const manifest = parseSeal(input);
   const audit = await auditSeal(manifest);
   if (!audit.ok) {
     throw new SealError('This seal is internally inconsistent, so it has been edited since it was made. It cannot be used to verify anything.', audit.problems);
   }
+  const signature = await checkSignature(manifest);
+  if (signature.present && !signature.valid) {
+    throw new SealError('This seal is signed, but the signature does not match its root and sealing time. The seal was altered after signing, or the signature was copied from another seal.');
+  }
 
-  const rows = await hashEntries(entries, onProgress);
+  const rows = await hashEntries(entries, hashing);
   const current = new Map(rows.map(r => [r.path, r]));
   const sealedPaths = new Set(manifest.files.map(f => f.path));
 
@@ -221,6 +262,7 @@ export async function verifySet(input, entries, { onProgress } = {}) {
     currentRoot,
     results,
     counts,
+    signature,
     levels: audit.levels,
   };
 }
@@ -239,28 +281,31 @@ export function proofDocument(manifest, path) {
   return {
     format: PROOF_FORMAT, version: VERSION, scheme: { ...SCHEME },
     root: manifest.root,
+    createdAt: manifest.createdAt,
     path: f.path, size: f.size, contentHash: f.contentHash, leafHash: f.leafHash,
     proof: f.proof,
+    // The signature covers only the root and time, so it carries over to one file.
+    ...(manifest.signature ? { signature: manifest.signature } : {}),
   };
 }
 
 /**
  * Read either a single-file proof or a whole seal, and return the proofs it holds as
- * [{ path, size, contentHash, leafHash, proof, root }].
+ * [{ path, size, contentHash, leafHash, proof, root, createdAt, signature? }].
  */
 export function parseProofSource(input) {
   const doc = parseJson(input, 'proof');
   if (doc && doc.format === FORMAT) {
     const m = parseSeal(doc);
-    return m.files.map(f => ({ ...f, root: m.root }));
+    return m.files.map(f => ({ ...f, root: m.root, createdAt: m.createdAt, signature: m.signature }));
   }
   if (!doc || doc.format !== PROOF_FORMAT) throw new SealError('That file is neither a seal nor a single-file proof.');
   if (doc.version !== VERSION) throw new SealError(`Unsupported proof version ${doc.version}. This build reads version ${VERSION}.`);
-  const { files: [f], root } = parseSeal({
-    format: FORMAT, version: VERSION, root: doc.root,
+  const m = parseSeal({
+    format: FORMAT, version: VERSION, root: doc.root, createdAt: doc.createdAt, signature: doc.signature,
     files: [{ path: doc.path, size: doc.size, contentHash: doc.contentHash, leafHash: doc.leafHash, proof: doc.proof }],
   });
-  return [{ ...f, root }];
+  return [{ ...m.files[0], root: m.root, createdAt: m.createdAt, signature: m.signature }];
 }
 
 /**

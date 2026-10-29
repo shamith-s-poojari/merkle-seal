@@ -11,9 +11,13 @@ import {
   leafHash, nodeHash, buildTree, proofFor, foldProof, verifyProof,
 } from '../src/merkle.js';
 import {
-  createSeal, parseSeal, auditSeal, verifySet, proofDocument,
-  parseProofSource, verifyFile, describeCounts, SealError,
+  createSeal, parseSeal, auditSeal, verifySet, proofDocument, hashEntries, hashInline,
+  parseProofSource, verifyFile, describeCounts, signSeal, unsignSeal, SealError,
 } from '../src/seal.js';
+import {
+  generateSigningKey, exportSigningKey, importSigningKey, checkSignature, fingerprint,
+} from '../src/sign.js';
+import { secondPreimageAttack, duplicateOddAttack } from '../src/attacks.js';
 
 class AssertionError extends Error {}
 
@@ -276,4 +280,101 @@ test('a whole seal can serve as the proof source', async () => {
   const entries = parseProofSource(JSON.stringify(manifest));
   equal(entries.length, SET.length, 'entries');
   ok(entries.every(e => e.root === manifest.root), 'root carried');
+});
+
+/* ---------------- concurrent hashing ---------------- */
+
+test('hashing keeps at most `concurrency` files in flight and still sorts', async () => {
+  let inFlight = 0, peak = 0;
+  const slow = async (entry) => {
+    peak = Math.max(peak, ++inFlight);
+    await new Promise(r => setTimeout(r, 2));
+    const out = await hashInline(entry);
+    inFlight--;
+    return out;
+  };
+  const many = Array.from({ length: 20 }, (_, i) => file(`f${String(19 - i).padStart(2, '0')}.txt`, `file ${i}`));
+  const seen = [];
+  const rows = await hashEntries(many, { hashContent: slow, concurrency: 3, onProgress: (d, t, b) => seen.push([d, t, b]) });
+  equal(peak, 3, 'peak concurrency');
+  equal(rows.map(r => r.path).join(), [...rows.map(r => r.path)].sort(comparePaths).join(), 'sorted');
+  equal(seen.length, 20, 'progress calls');
+  equal(seen[19][2], many.reduce((n, f) => n + f.bytes.length, 0), 'bytes counted');
+});
+
+test('the root does not depend on how many files are hashed in parallel', async () => {
+  const a = await createSeal(SET, { createdAt: FIXED, concurrency: 1 });
+  const b = await createSeal(SET, { createdAt: FIXED, concurrency: 8 });
+  equal(a.manifest.root, b.manifest.root, 'root');
+});
+
+/* ---------------- signatures ---------------- */
+
+test('a signed seal verifies and names its signer by fingerprint', async () => {
+  const signer = await generateSigningKey();
+  const { manifest } = await createSeal(SET, { signer });
+  const parsed = parseSeal(JSON.stringify(manifest));
+  const sig = await checkSignature(parsed);
+  ok(sig.present && sig.valid, 'signature not valid');
+  equal(sig.fingerprint, await fingerprint(signer.publicJwk), 'fingerprint');
+  const v = await verifySet(parsed, SET);
+  ok(v.intact && v.signature.valid, 'verifySet did not accept the signed seal');
+});
+
+test('changing the root or time of a signed seal breaks the signature', async () => {
+  const signer = await generateSigningKey();
+  const { manifest } = await createSeal(SET, { signer, createdAt: FIXED });
+  ok(!(await checkSignature({ ...manifest, createdAt: '2027-01-01T00:00:00.000Z' })).valid, 'backdated seal accepted');
+  ok(!(await checkSignature({ ...manifest, root: 'a'.repeat(64) })).valid, 'other root accepted');
+});
+
+test('a signature lifted onto a different seal is refused', async () => {
+  const signer = await generateSigningKey();
+  const signed = (await createSeal(SET, { signer })).manifest;
+  const other = (await createSeal(SET.slice(1))).manifest;
+  await rejects(() => verifySet({ ...other, signature: signed.signature }, SET.slice(1)), /signature does not match/, 'lifted signature');
+});
+
+test('a mislabelled key fingerprint is caught', async () => {
+  const signer = await generateSigningKey();
+  const { manifest } = await createSeal(SET, { signer });
+  const lie = { ...manifest, signature: { ...manifest.signature, fingerprint: 'b'.repeat(64) } };
+  ok(!(await checkSignature(lie)).valid, 'wrong fingerprint accepted');
+});
+
+test('a signing key survives export and import', async () => {
+  const first = await generateSigningKey();
+  const again = await importSigningKey(JSON.parse(JSON.stringify(await exportSigningKey(first))));
+  const { manifest } = await createSeal(SET, { signer: again });
+  equal((await checkSignature(manifest)).fingerprint, await fingerprint(first.publicJwk), 'same key');
+  await rejects(() => importSigningKey({ kty: 'EC', crv: 'P-256', x: 'a', y: 'b' }), /private key/, 'public-only key');
+});
+
+test('signing and unsigning do not change the root', async () => {
+  const { manifest } = await createSeal(SET);
+  const signed = await signSeal(manifest, await generateSigningKey());
+  equal(signed.root, manifest.root, 'root');
+  equal(unsignSeal(signed).signature, undefined, 'unsigned');
+  equal((await checkSignature(manifest)).present, false, 'unsigned seal has no signature');
+});
+
+test('a single-file proof carries the seal signature', async () => {
+  const { manifest } = await createSeal(SET, { signer: await generateSigningKey() });
+  const [entry] = parseProofSource(JSON.stringify(proofDocument(manifest, 'LICENSE')));
+  ok((await checkSignature(entry)).valid, 'proof signature invalid');
+});
+
+/* ---------------- attack lab ---------------- */
+
+test('second preimage: works without domain separation, fails with it', async () => {
+  const naive = await secondPreimageAttack({ domainSeparation: false });
+  ok(naive.collides, 'attack failed against the untagged tree');
+  equal(naive.fake.names.length, 2, 'forged set size');
+  equal(naive.forged[0].hex.length, 128, 'forged file is two hashes');
+  ok(!(await secondPreimageAttack({ domainSeparation: true })).collides, 'attack worked against the real tree');
+});
+
+test('CVE-2012-2459: works when odd nodes are duplicated, fails when promoted', async () => {
+  ok((await duplicateOddAttack({ promote: false })).collides, 'attack failed against the duplicating tree');
+  ok(!(await duplicateOddAttack({ promote: true })).collides, 'attack worked against the real tree');
 });

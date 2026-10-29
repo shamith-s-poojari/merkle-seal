@@ -1,24 +1,25 @@
 # Merkle Seal
 
-Seal a set of files under one Merkle root. Later, check the files against that seal and
-find out exactly which file was modified, added, removed or renamed, not just that
-"something changed".
+Seal a set of files under one Merkle root, optionally signed. Later, check the files
+against that seal and find out exactly which file was modified, added, removed or renamed,
+not just that "something changed".
 
-**Try it:** <https://shamith-s-poojari.github.io/merkle-seal/> (there is a built-in demo
-if you have no files to hand)
+**Try it:** <https://shamith-s-poojari.github.io/merkle-seal/> (it opens on a sealed demo
+set, so there is something to verify and tamper with straight away)
 
-Everything runs in the browser. Files are read and hashed locally with the Web Crypto
-API, and the page's Content Security Policy sets `connect-src 'none'`, so the page cannot
-send anything anywhere even if it wanted to. No server, no upload, no analytics, no
-dependencies.
+Everything runs in the browser. Files are hashed locally with the Web Crypto API on a pool
+of Web Workers, and the page's Content Security Policy sets `connect-src 'none'`, so the
+page cannot send anything anywhere even if it wanted to. No server, no upload, no
+analytics, no dependencies.
 
 ## What it does
 
 | Mode | Input | Output |
 |---|---|---|
-| **Seal** | files or a folder | the root, a tree view, and a `seal.json` with every file's hash and inclusion proof; each file's proof can also be exported on its own |
-| **Verify** | `seal.json` plus the files as they are now | a verdict, and every file marked `unchanged`, `modified`, `missing`, `not in seal` or `renamed`, with the changed paths drawn in red on the tree |
-| **One file** | one file, its proof (or the whole seal) and a root you trust | whether that file is the one that was sealed, shown as each hash step from leaf to root |
+| **Seal** | files or a folder | the root, timing and proof-size stats, a tree view, and a `seal.json` with every file's hash and inclusion proof, optionally signed with ECDSA P-256; each file's proof can also be exported on its own |
+| **Verify** | `seal.json` plus the files as they are now | a verdict, every file marked `unchanged`, `modified`, `missing`, `not in seal` or `renamed`, the changed paths drawn in red on the tree, and who signed the seal |
+| **One file** | one file, its proof (or the whole seal) and a root you trust | whether that file is the one that was sealed, shown as each hash step from leaf to root, plus the signature check |
+| **Attack lab** | nothing | the two classic Merkle forgeries run live, against a weakened tree and against this one, with the defence switchable |
 
 ## How it works
 
@@ -76,6 +77,49 @@ its path and content hash, the leaves are rebuilt into the root, and every proof
 checked. A hand-edited `seal.json` is refused with a list of what does not add up, instead
 of reporting doctored hashes as "unchanged".
 
+### The attack lab
+
+The two defences above are easy to claim, so the page lets anyone watch them work.
+[`src/attacks.js`](src/attacks.js) builds deliberately weakened trees and runs each attack
+for real:
+
+- **Second preimage.** Against a tree with no prefixes, two 64-byte "files" made of
+  concatenated real leaf hashes rebuild the genuine root. With domain separation the same
+  forgery gives a different root.
+- **CVE-2012-2459.** Against a tree that duplicates odd nodes, `[a, b, c]` and
+  `[a, b, c, c]` share a root. With promotion they do not.
+
+The tests run both attacks in both modes, so the lab cannot quietly drift from the claims.
+
+### Signed seals
+
+A root proves the files have not changed since sealing, but not who sealed them: anyone who
+can rewrite both the files and the seal can make them agree. A seal can therefore be signed
+with ECDSA P-256 over SHA-256 ([`src/sign.js`](src/sign.js)). The signature covers this exact
+text, so other tools can reproduce it:
+
+```
+merkle-seal v2
+root <root hex>
+created <createdAt>
+```
+
+The root already commits to every file, so signing it signs the whole set, and covering
+`createdAt` stops a seal being backdated. The public key travels in the seal; what makes a
+signature mean something is its **fingerprint**, the SHA-256 of the raw public key, which a
+verifier compares with one they already know. The fingerprint is recomputed from the key
+during verification, never read from the seal. Keys are generated in the page, can be saved
+as a JWK and loaded again, and never leave the tab otherwise.
+
+### Hashing off the main thread
+
+Content hashing runs on a pool of Web Workers ([`src/hash-pool.js`](src/hash-pool.js)), one
+per core up to eight. Each worker reads its `File` itself, so large files never pass through
+the page's memory, and the page stays responsive. Twice as many files as workers are kept in
+flight, which keeps the workers busy while bounding memory. The result is identical to
+hashing on one thread, and a test checks that. In Chrome on an 8-core machine, 100 MB
+across 20 files sealed in under 0.1 s.
+
 ## The seal format
 
 ```json
@@ -97,30 +141,41 @@ of reporting doctored hashes as "unchanged".
         { "side": "right", "hash": "fb2b0bcf…" }
       ]
     }
-  ]
+  ],
+  "signature": {
+    "alg": "ECDSA-P256-SHA256",
+    "publicKey": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+    "fingerprint": "23e45a66a8ac3883…",
+    "value": "<64-byte r ‖ s, hex>"
+  }
 }
 ```
 
 `contentHash` is a plain SHA-256 of the file, so it can be checked with `sha256sum`.
-`side` says which side the sibling sits on when it is combined with the running hash. A
-single-file proof (`*.proof.json`) holds the same fields for one file plus the root, with
-`"format": "merkle-seal-proof"`.
+`side` says which side the sibling sits on when it is combined with the running hash.
+`signature` is optional. A single-file proof (`*.proof.json`) holds the same fields for one
+file plus the root, time and signature, with `"format": "merkle-seal-proof"`.
 
 ## Project layout
 
 ```
-index.html        the page
+index.html           the page
 styles.css
-src/merkle.js     hashing, tree building, inclusion proofs (no DOM)
-src/seal.js       sealing, seal parsing and auditing, set and single-file verification (no DOM)
-src/app.js        UI: drag and drop, folder walking, tree drawing, proof steps
-test/cases.js     test cases shared by both runners
-test/run.test.js  runs them under Node
-tests.html        runs them in the browser
+src/merkle.js        hashing, tree building, inclusion proofs
+src/seal.js          sealing, seal parsing and auditing, set and single-file verification
+src/sign.js          ECDSA P-256 keys, signing and signature checks
+src/attacks.js       the weakened trees and the two attacks, for the lab and the tests
+src/hash-pool.js     Web Worker pool for content hashing
+src/hash-worker.js   the worker
+src/app.js           wires the four panes together
+src/ui/              DOM helpers, file drops, tree drawing, attack lab, signing panel
+test/cases.js        test cases shared by both runners
+test/run.test.js     runs them under Node
+tests.html           runs them in the browser
 ```
 
-`merkle.js` and `seal.js` use only the standard Web Crypto API, so the same code runs in
-the browser and in Node without changes.
+Everything outside `src/ui/`, `app.js` and the worker pool is free of the DOM and uses only
+the standard Web Crypto API, so the same code runs in the browser and in Node unchanged.
 
 ## Running it locally
 
@@ -136,12 +191,20 @@ npx serve .
 npm test
 ```
 
-27 cases, no dependencies (Node 20 or newer). They cover the SHA-256 test vector, the
-exact leaf and node byte layouts, domain separation, path binding and normalisation, byte
-order sorting, proofs for every leaf of every tree size from 1 to 33, rejection of forged
-leaves, flipped sides and altered siblings, the CVE-2012-2459 case, order independence,
-detection of modified, missing, added and renamed files, refusal of a hand-edited seal,
-malformed input, and single-file verification against the right and wrong roots.
+38 cases, no dependencies (Node 20 or newer). They cover:
+
+- **Hashing:** the SHA-256 test vector, the exact leaf and node byte layouts, domain
+  separation, path binding and normalisation, byte-order sorting.
+- **Trees and proofs:** proofs for every leaf of every tree size from 1 to 33; rejection of
+  forged leaves, flipped sides and altered siblings; the CVE-2012-2459 case.
+- **Seals:** order independence, detection of modified, missing, added and renamed files,
+  refusal of a hand-edited seal, malformed input, and single-file checks against the right
+  and wrong roots.
+- **Signatures:** valid signatures, a changed root or backdated time, a signature lifted
+  onto another seal, a mislabelled fingerprint, and key export and import.
+- **Concurrency:** the in-flight limit is respected, and the root does not depend on it.
+- **The attack lab:** each attack succeeds against the weakened tree and fails against the
+  real one.
 
 The same cases run in the browser at [`tests.html`](https://shamith-s-poojari.github.io/merkle-seal/tests.html),
 against that browser's own Web Crypto implementation.
@@ -153,12 +216,12 @@ branch → `main`, folder `/ (root)`. `.nojekyll` stops Jekyll from processing t
 
 ## Known limits
 
-- Each file is read fully into memory before hashing, so very large files are slow. Web
-  Crypto has no streaming SHA-256, so incremental hashing would need a hand-written one.
-- The seal is not signed. It proves the files match what was sealed; it does not prove
-  who sealed them. Anyone who can change both the files and the seal can make them agree,
-  so keep the root (or the seal) somewhere the files cannot reach, or publish the root.
-- `createdAt` comes from the sealer's clock. It is a note, not evidence.
+- Each file is read whole inside its worker before hashing. Web Crypto has no streaming
+  SHA-256, so a single file larger than the browser's memory allowance cannot be sealed.
+- A signature proves which key signed, not whose key it is. Publish your fingerprint
+  somewhere people already trust, or keep the root itself out of the files' reach.
+- `createdAt` comes from the sealer's clock. A signature stops it being changed later, but
+  it is not a trusted timestamp.
 - `.DS_Store`, `Thumbs.db` and `desktop.ini` are skipped, since copying a folder between
   machines adds or changes them.
 
