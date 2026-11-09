@@ -48,10 +48,13 @@ export function download(name, data) {
 }
 
 export async function copy(button, text) {
-  const label = button.textContent;
-  try { await navigator.clipboard.writeText(text); button.textContent = 'copied'; }
-  catch { button.textContent = 'copy failed'; }
-  setTimeout(() => { button.textContent = label; }, 1400);
+  // Keep the button's own children (icons included) to put back afterwards.
+  const kids = [...button.childNodes];
+  const iconOnly = !button.textContent.trim();
+  const say = (msg) => button.replaceChildren(iconOnly ? (msg === 'copied' ? '✓' : '✗') : msg);
+  try { await navigator.clipboard.writeText(text); say('copied'); }
+  catch { say('copy failed'); }
+  setTimeout(() => button.replaceChildren(...kids), 1400);
 }
 
 /** Ask for one local file and resolve with it, or with null if the picker is closed. */
