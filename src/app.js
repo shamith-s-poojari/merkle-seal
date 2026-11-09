@@ -1,22 +1,24 @@
 /*
- * The page: wiring the four panes together. The cryptography lives in merkle.js,
- * seal.js and sign.js; the pieces of UI live in ./ui/.
+ * The page: one session (the current seal, and the latest verification against it)
+ * shown on the dashboard, and the views that create or check it. The cryptography
+ * lives in merkle.js, seal.js and sign.js; the pieces of UI live in ./ui/.
  */
 
-import { isHash, pathIndices } from './merkle.js';
+import { isHash } from './merkle.js';
 import {
-  createSeal, parseSeal, verifySet, describeCounts, proofDocument,
-  parseProofSource, verifyFile, signSeal, FORMAT,
+  createSeal, parseSeal, verifySet, parseProofSource, verifyFile, signSeal, FORMAT,
 } from './seal.js';
 import { checkSignature, shortFingerprint } from './sign.js';
 import { createHashPool } from './hash-pool.js';
 import {
-  $, h, short, plural, basename, bytes, duration, download, copy, errorCard, status, setSlot,
+  $, h, short, plural, basename, bytes, download, copy, errorCard, status, setSlot,
 } from './ui/dom.js';
-import { dropZone } from './ui/files.js';
-import { treeCard, proofCard, proofMarks } from './ui/tree.js';
+import { dropZone, fromInput } from './ui/files.js';
+import { proofCard } from './ui/tree.js';
 import { renderLab } from './ui/lab.js';
 import { signingPanel, currentSigner, onSignerChange } from './ui/signing.js';
+import { renderDashboard, setSearch } from './ui/dashboard.js';
+import { icon } from './ui/icons.js';
 
 /* ---------- hashing ---------- */
 
@@ -24,146 +26,136 @@ import { signingPanel, currentSigner, onSignerChange } from './ui/signing.js';
 // files as workers are kept in flight, so a worker never waits on the main thread.
 const pool = createHashPool();
 const hashing = pool ? { hashContent: pool.hash, concurrency: pool.size * 2 } : {};
-const engine = pool ? `${plural(pool.size, 'worker')}` : 'the main thread';
+const engine = pool ? plural(pool.size, 'worker') : 'the main thread';
+$('engine-chip').replaceChildren(h('span', { class: 'dot' }), `${engine} · offline`);
 
-/** Hash with progress shown in a pane's status line. Returns the result and timing. */
+/** Hash with progress shown in a view's status line. Returns the result and timing. */
 async function timed(name, entries, work) {
   const total = entries.reduce((n, e) => n + (e.size ?? 0), 0);
   const started = performance.now();
-  const result = await work({
-    ...hashing,
-    onProgress: (done, count, bytesDone) =>
-      status(name, `Hashing ${done} of ${count} on ${engine}… ${total ? Math.round(100 * bytesDone / total) : 100}%`),
-  });
-  status(name, '');
-  return { result, ms: performance.now() - started };
+  try {
+    const result = await work({
+      ...hashing,
+      onProgress: (done, count, bytesDone) =>
+        status(name, `Hashing ${done} of ${count} on ${engine}… ${total ? Math.round(100 * bytesDone / total) : 100}%`),
+    });
+    return { result, ms: performance.now() - started };
+  } finally {
+    status(name, '');
+  }
 }
 
-/* ---------- tabs ---------- */
+/* ---------- views and navigation ---------- */
 
-const tabs = ['seal', 'verify', 'one', 'lab'];
+const VIEWS = {
+  dashboard: ['Dashboard', 'Integrity overview'],
+  seal: ['Workflows', 'Seal files'],
+  verify: ['Workflows', 'Verify a set'],
+  one: ['Workflows', 'Check one file'],
+  lab: ['Security', 'Attack lab'],
+  key: ['Security', 'Signing key'],
+};
 let labDrawn = false;
 
-function showTab(name, focus = false) {
-  for (const t of tabs) {
-    const tab = $(`tab-${t}`);
-    tab.setAttribute('aria-selected', String(t === name));
-    tab.tabIndex = t === name ? 0 : -1;
-    $(`pane-${t}`).hidden = t !== name;
+function showView(name) {
+  if (!VIEWS[name]) name = 'dashboard';
+  for (const v of Object.keys(VIEWS)) $(`view-${v}`).hidden = v !== name;
+  for (const a of document.querySelectorAll('.nav [data-view]')) {
+    if (a.dataset.view === name) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
   }
+  [$('crumb-view').textContent, $('crumb-title').textContent] = VIEWS[name];
+  document.title = name === 'dashboard' ? 'Merkle Seal' : `${VIEWS[name][1]} · Merkle Seal`;
   // The lab animates as it draws, so it waits until someone opens it.
   if (name === 'lab' && !labDrawn) { labDrawn = true; renderLab($('lab-out')); }
-  if (focus) $(`tab-${name}`).focus();
+  setMenu(false);
+  if (location.hash.slice(1) !== name) history.replaceState(null, '', `#${name}`);
+  scrollTo({ top: 0 });
 }
 
-for (const [i, t] of tabs.entries()) {
-  const tab = $(`tab-${t}`);
-  tab.addEventListener('click', () => showTab(t));
-  tab.addEventListener('keydown', (e) => {
-    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-    if (step) showTab(tabs[(i + step + tabs.length) % tabs.length], true);
+addEventListener('hashchange', () => showView(location.hash.slice(1)));
+
+function setMenu(open) {
+  document.body.classList.toggle('menu-open', open);
+  $('menu').setAttribute('aria-expanded', String(open));
+  $('scrim').hidden = !open;
+}
+$('menu').addEventListener('click', () => setMenu(!document.body.classList.contains('menu-open')));
+$('scrim').addEventListener('click', () => setMenu(false));
+
+$('search').addEventListener('input', (e) => {
+  if ($('view-dashboard').hidden) showView('dashboard');
+  setSearch(e.target.value);
+});
+$('top-new').addEventListener('click', () => $('seal-files').click());
+
+/* ---------- the session ---------- */
+
+// manifest: what is shown and downloaded. For a seal made here, that is `base`
+// signed with the active key, if there is one. A loaded seal is shown as it came.
+let session = null;   // { base, manifest, levels, ms, demo, own, verification }
+let renderToken = 0;
+
+async function setSession(next) {
+  session = next;
+  await refresh();
+}
+
+async function refresh() {
+  if (!session) return;
+  const token = ++renderToken;
+  const signer = currentSigner();
+  const manifest = session.own && signer ? await signSeal(session.base, signer) : session.base;
+  const signature = await checkSignature(manifest);
+  if (token !== renderToken) return;
+  session.manifest = manifest;
+
+  renderDashboard($('dashboard'), { ...session, engine, signature }, {
+    newSeal: () => $('seal-files').click(),
+    verifyFiles: pickAndVerify,
+    tamperDemo,
+    clearVerification: () => setSession({ ...session, verification: null }),
+    openView: showView,
   });
+  renderSealSummary(manifest, signature);
 }
 
-/* ---------- 1. seal ---------- */
+onSignerChange(() => { renderKey(); if (session?.own) refresh(); });
 
-const sealOut = $('seal-out');
-let sealed = null;   // { manifest (unsigned), levels, ms, demo }
+/* ---------- seal ---------- */
 
 dropZone('seal', (entries) => runSeal(entries));
 $('demo').addEventListener('click', () => runSeal(demoFiles(), { demo: true }));
-onSignerChange(() => { if (sealed) renderSeal(); });
 
-async function runSeal(entries, { demo = false } = {}) {
-  sealOut.replaceChildren();
+async function runSeal(entries, { demo = false, navigate = true } = {}) {
+  $('seal-out').replaceChildren();
   if (!entries.length) { status('seal', 'No files found in that drop.'); return; }
   try {
     const { result, ms } = await timed('seal', entries, (opts) => createSeal(entries, opts));
-    sealed = { ...result, ms, demo };
-    await renderSeal({ animate: true });
+    await setSession({ base: result.manifest, levels: result.levels, ms, demo, own: true, verification: null });
+    if (navigate) showView('dashboard');
   } catch (err) {
-    status('seal', '');
-    sealOut.replaceChildren(errorCard(err));
+    showView('seal');
+    $('seal-out').replaceChildren(errorCard(err));
   }
 }
 
-function statsStrip(manifest, levels, ms) {
-  const n = manifest.files.length;
-  const total = manifest.files.reduce((sum, f) => sum + f.size, 0);
-  const proof = manifest.files.reduce((sum, f) => sum + f.proof.length, 0) / n;
-  const rate = total / Math.max(ms, 1) * 1000;
-  const tile = (value, label) => h('div', { class: 'stat' }, h('b', null, value), h('span', null, label));
-  return h('div', { class: 'stats' },
-    tile(n.toLocaleString('en'), n === 1 ? 'file' : 'files'),
-    tile(bytes(total), 'hashed'),
-    tile(duration(ms), `on ${engine}`),
-    // On a few bytes the time is all start-up, so a rate would only mislead.
-    total >= 1048576 && tile(`${bytes(rate)}/s`, 'throughput'),
-    tile(String(levels.length), 'tree levels'),
-    tile(`${Number(proof.toFixed(1))} × 32 B`, `proof per file, vs ${n.toLocaleString('en')} × 32 B for a hash list`));
-}
-
-async function renderSeal({ animate = false } = {}) {
-  const { levels, ms, demo } = sealed;
-  const signer = currentSigner();
-  const manifest = signer ? await signSeal(sealed.manifest, signer) : sealed.manifest;
-  const names = manifest.files.map(f => f.path);
-
-  const copyBtn = h('button', { class: 'btn', onclick: () => copy(copyBtn, manifest.root) }, 'copy root');
-  const head = h('div', { class: 'card' },
-    h('h2', null, demo ? 'Sealed: demo set' : 'Sealed'),
-    h('p', { class: 'sub' }, demo
-      ? 'Six sample files, sealed in this browser just now. Drop your own files above to seal them instead.'
-      : `Hashed in this browser. Nothing was uploaded.`),
+function renderSealSummary(manifest, signature) {
+  const copyBtn = h('button', { class: 'btn', onclick: () => copy(copyBtn, manifest.root) }, icon('copy'), h('span', null, 'Copy root'));
+  $('seal-out').replaceChildren(h('div', { class: 'card' },
+    h('h2', null, 'Current seal'),
+    h('p', { class: 'sub' }, `${plural(manifest.files.length, 'file')} · ${signature.present ? `signed with key ${shortFingerprint(signature.fingerprint)}` : 'unsigned'}`),
     h('div', { class: 'root-hash' }, manifest.root),
-    statsStrip(manifest, levels, ms),
-    signingPanel(),
     h('div', { class: 'actions' },
-      h('button', { class: 'btn solid', onclick: () => download('seal.json', manifest) },
-        manifest.signature ? 'download signed seal.json' : 'download seal.json'),
+      h('button', { class: 'btn btn-solid', onclick: () => download('seal.json', manifest) }, icon('download'),
+        h('span', null, manifest.signature ? 'Download signed seal.json' : 'Download seal.json')),
       copyBtn,
-      h('button', { class: 'btn', onclick: () => { loadVerifySeal(manifest, 'this seal'); showTab('verify'); } }, 'verify against this seal')));
-
-  const hint = demo && h('div', { class: 'card hint' },
-    h('h2', null, 'Now tamper with it'),
-    h('p', null, 'Change one number in one file and verify the whole set against this seal:'),
-    h('div', { class: 'actions' },
-      h('button', { class: 'btn solid', onclick: () => runDemoVerify(manifest) }, 'edit data/report.csv and verify'),
-      h('button', { class: 'btn', onclick: () => showTab('lab', true) }, 'or try to forge a root')));
-
-  const split = h('div', { class: 'split' });
-  const rows = new Map();
-  const select = async (i, first = false) => {
-    for (const [j, tr] of rows) tr.classList.toggle('selected', j === i);
-    const f = manifest.files[i];
-    split.replaceChildren(
-      treeCard(levels, names, { marks: proofMarks(levels, i), onPick: select, animate: first && animate }),
-      await proofCard({ title: 'Inclusion proof', path: f.path, contentHash: f.contentHash, proof: f.proof, root: manifest.root }));
-  };
-
-  const table = h('div', { class: 'table-wrap' }, h('table', null,
-    h('thead', null, h('tr', null, h('th', null, 'path'), h('th', null, 'size'), h('th', null, 'content sha-256'), h('th', null, 'proof'), h('th'))),
-    h('tbody', null, manifest.files.map((f, i) => {
-      const tr = h('tr', { onclick: () => select(i) },
-        h('td', { class: 'path' }, f.path),
-        h('td', { class: 'num' }, bytes(f.size)),
-        h('td', { class: 'h', title: f.contentHash }, short(f.contentHash)),
-        h('td', { class: 'num' }, plural(f.proof.length, 'hash', 'hashes')),
-        h('td', { class: 'act' }, h('button', {
-          class: 'btn small', title: `Download the inclusion proof for ${f.path}`,
-          onclick: (e) => { e.stopPropagation(); download(`${basename(f.path)}.proof.json`, proofDocument(manifest, f.path)); },
-        }, 'proof.json')));
-      rows.set(i, tr);
-      return tr;
-    }))));
-
-  sealOut.replaceChildren(head, hint || '', split, table);
-  await select(0, true);
+      h('button', { class: 'btn', onclick: () => showView('dashboard') }, icon('grid'), h('span', null, 'Open dashboard')),
+      !signature.present && h('button', { class: 'btn', onclick: () => showView('key') }, icon('key'), h('span', null, 'Sign seals')))));
 }
 
-/* ---------- 2. verify a set ---------- */
+/* ---------- verify ---------- */
 
-const verifyOut = $('verify-out');
 const verifyState = { manifest: null, entries: null };
 
 dropZone('verify-seal', async (entries) => {
@@ -201,107 +193,50 @@ function loadVerifySeal(manifest, label) {
 let verifyRun = 0;
 async function runVerify() {
   const run = ++verifyRun;
-  verifyOut.replaceChildren();
+  $('verify-out').replaceChildren();
   const { manifest, entries } = verifyState;
   if (!manifest || !entries?.length) {
     status('verify', manifest ? 'Now add the files to check.' : entries ? 'Now add the seal.json to check them against.' : '');
     return;
   }
   try {
-    const { result, ms } = await timed('verify', entries, (opts) => verifySet(manifest, entries, opts));
-    if (run !== verifyRun) return;
-    await renderVerify(result, ms);
+    await verifyInto(manifest, entries, 'verify', run);
   } catch (err) {
-    if (run !== verifyRun) return;
-    status('verify', '');
-    verifyOut.replaceChildren(errorCard(err));
+    if (run === verifyRun) $('verify-out').replaceChildren(errorCard(err));
   }
 }
 
-const ORDER = { modified: 0, missing: 1, renamed: 2, added: 3, unchanged: 4 };
-const LABEL = { unchanged: 'unchanged', modified: 'modified', missing: 'missing', added: 'not in seal', renamed: 'renamed' };
-
-const signedBy = (sig) => sig.present
-  ? h('span', { class: 'match' }, `key ${shortFingerprint(sig.fingerprint)}, signature valid`)
-  : h('span', { class: 'sub' }, 'not signed');
-
-async function renderVerify(v, ms) {
-  const { manifest, levels, results, intact } = v;
-  const bad = results.filter(r => r.status !== 'unchanged');
-  const hashedBytes = results.reduce((n, r) => n + (r.contentHash ? r.size : 0), 0);
-
-  const verdict = h('div', { class: `card verdict ${intact ? 'ok' : 'bad'}` },
-    h('h2', null, intact ? 'Intact' : 'Changed'),
-    h('p', null, intact
-      ? `All ${plural(results.length, 'file')} match the seal, and the rebuilt root equals the sealed root.`
-      : `${describeCounts(v.counts)}. ${bad.length === 1 ? 'This file is' : 'These files are'} why the root no longer matches:`),
-    !intact && h('ul', null, bad.sort((a, b) => ORDER[a.status] - ORDER[b.status]).map(r =>
-      h('li', null, r.status === 'renamed' ? `${r.from} → ${r.path} (renamed, content unchanged)` : `${r.path} (${LABEL[r.status]})`))),
-    h('dl', { class: 'kv' },
-      h('dt', null, 'sealed root'), h('dd', { class: 'hash' }, v.sealedRoot),
-      h('dt', null, 'root now'), h('dd', { class: intact ? 'match' : 'mismatch' }, v.currentRoot ?? 'no files'),
-      h('dt', null, 'signed by'), h('dd', null, signedBy(v.signature)),
-      manifest.createdAt && [h('dt', null, 'sealed at'), h('dd', null, `${manifest.createdAt} (sealer's clock${v.signature.present ? ', covered by the signature' : ''})`)],
-      h('dt', null, 'checked'), h('dd', null, `${bytes(hashedBytes)} in ${duration(ms)} on ${engine}`)));
-
-  // Changed leaves, and every node above them, turn red on the sealed tree.
-  const dirty = new Map();
-  for (const r of results) {
-    if (r.index === null || r.status === 'unchanged') continue;
-    for (const [l, j] of pathIndices(levels, r.index).entries()) dirty.set(`${l}:${j}`, 'dirty');
-    if (r.status !== 'modified') dirty.set(`0:${r.index}`, 'gone');
-  }
-  const names = manifest.files.map(f => f.path);
-  const byIndex = new Map(results.filter(r => r.index !== null).map(r => [r.index, r]));
-
-  const split = h('div', { class: 'split' });
-  const rows = new Map();
-  const select = async (i, first = false) => {
-    for (const [j, tr] of rows) tr.classList.toggle('selected', j === i);
-    const r = byIndex.get(i);
-    const f = manifest.files[i];
-    // Damage outranks selection, so a changed path stays red while it is selected.
-    const marks = new Map([...proofMarks(levels, i), ...dirty]);
-    const present = r.status === 'unchanged' || r.status === 'modified';
-    split.replaceChildren(
-      treeCard(levels, names, {
-        marks, onPick: select, animate: first,
-        legend: [h('span', null, h('i', { class: 'dirty' }), 'changed, missing or renamed')],
-      }),
-      await proofCard({
-        title: present ? 'Proof, using the file as it is now' : 'Sealed proof',
-        path: f.path,
-        contentHash: present ? r.contentHash : f.contentHash,
-        proof: f.proof,
-        root: manifest.root,
-        note: present ? null : r.status === 'renamed'
-          ? `This file now lives at ${r.path}. A leaf includes its path, so it no longer proves under the old one.`
-          : 'This file was not supplied, so this is the proof as sealed.',
-      }));
-  };
-
-  const sorted = [...results].sort((a, b) => ORDER[a.status] - ORDER[b.status]);
-  const table = h('div', { class: 'table-wrap' }, h('table', null,
-    h('thead', null, h('tr', null, h('th', null, 'status'), h('th', null, 'path'), h('th', null, 'size'), h('th', null, 'sealed sha-256'), h('th', null, 'sha-256 now'))),
-    h('tbody', null, sorted.map(r => {
-      const tr = h('tr', r.index === null ? null : { onclick: () => select(r.index) },
-        h('td', null, h('span', { class: `pill ${r.status}` }, LABEL[r.status])),
-        h('td', { class: 'path' }, r.path, r.from && h('span', { class: 'from' }, `was ${r.from}`)),
-        h('td', { class: 'num' }, bytes(r.size ?? r.sealed.size)),
-        h('td', { class: 'h' }, r.sealed ? short(r.sealed.contentHash) : '—'),
-        h('td', { class: `h ${r.status === 'modified' ? 'mismatch' : ''}` }, r.contentHash ? short(r.contentHash) : '—'));
-      if (r.index !== null) rows.set(r.index, tr);
-      return tr;
-    }))));
-
-  verifyOut.replaceChildren(verdict, split, table);
-  const first = sorted.find(r => r.index !== null);
-  if (first) await select(first.index, true);
+/** Verify `entries` against `manifest`, make that the session and open the dashboard. */
+async function verifyInto(manifest, entries, statusName, run = ++verifyRun) {
+  const { result, ms } = await timed(statusName, entries, (opts) => verifySet(manifest, entries, opts));
+  if (run !== verifyRun) return;
+  // Keep our own signed seal as the session when it is the one being checked.
+  const same = session && session.manifest.root === result.manifest.root;
+  const base = same ? session.base : result.manifest;
+  await setSession({
+    base, levels: result.levels, ms: same ? session.ms : ms,
+    demo: same && session.demo, own: same && session.own,
+    verification: { result, ms },
+  });
+  showView('dashboard');
 }
 
-/* ---------- 3. check one file ---------- */
+/** "Verify files" on the dashboard: pick files and check them against the current seal. */
+function pickAndVerify() {
+  const input = h('input', { type: 'file', multiple: true, hidden: true });
+  input.addEventListener('change', async () => {
+    const entries = fromInput(input);
+    input.remove();
+    if (!entries.length) return;
+    try { await verifyInto(session.manifest, entries, 'dash'); }
+    catch (err) { status('dash', err.message); }
+  });
+  document.body.append(input);
+  input.click();
+}
 
-const oneOut = $('one-out');
+/* ---------- check one file ---------- */
+
 const oneState = { sources: null, file: null };
 const rootInput = $('one-root');
 const pick = $('one-pick');
@@ -345,10 +280,17 @@ function matchPick() {
 pick.addEventListener('change', runOne);
 rootInput.addEventListener('input', runOne);
 
+const signedBy = (sig) => sig.present
+  ? sig.valid
+    ? h('span', { class: 'match' }, `key ${shortFingerprint(sig.fingerprint)}, signature valid`)
+    : h('span', { class: 'mismatch' }, 'signature does not match this root')
+  : h('span', { class: 'muted' }, 'not signed');
+
 let oneRun = 0;
 async function runOne() {
   const run = ++oneRun;
-  oneOut.replaceChildren();
+  const out = $('one-out');
+  out.replaceChildren();
   const { sources, file } = oneState;
   const root = rootInput.value.trim().toLowerCase();
   rootInput.classList.toggle('bad', root !== '' && !isHash(root));
@@ -366,27 +308,39 @@ async function runOne() {
     if (run !== oneRun) return;
     status('one', '');
     const fromProof = root === entry.root;
-    oneOut.replaceChildren(
-      h('div', { class: `card verdict ${result.ok && (!sig.present || sig.valid) ? 'ok' : 'bad'}` },
-        h('h2', null, result.ok ? 'Verified' : 'Does not verify'),
-        h('p', null, result.ok
-          ? `${file.path} is the file sealed as ${entry.path}, under this root. Checked with ${plural(entry.proof.length, 'sibling hash', 'sibling hashes')} and nothing else from the set.`
-          : result.contentHash !== entry.contentHash
-            ? `${file.path} is not the file sealed as ${entry.path}: its content hash differs from the sealed one.`
-            : `The file matches the sealed content hash, but its proof does not lead to this root.`),
-        !fromProof && h('p', { class: 'sub' }, 'Checked against the root you entered, not the one stored in the proof.'),
-        h('dl', { class: 'kv' },
-          h('dt', null, 'signed by'),
-          h('dd', null, sig.present && !sig.valid
-            ? h('span', { class: 'mismatch' }, 'signature does not match this proof’s root')
-            : signedBy(sig)))),
+    out.replaceChildren(
+      h('div', { class: `banner ${result.ok && (!sig.present || sig.valid) ? 'ok' : 'bad'}` },
+        h('span', { class: 'banner-icon' }, icon(result.ok ? 'shield' : 'alert')),
+        h('div', { class: 'banner-text' },
+          h('b', null, result.ok ? 'Verified. ' : 'Does not verify. '),
+          h('span', null, result.ok
+            ? `${file.path} is the file sealed as ${entry.path}, under this root. Checked with ${plural(entry.proof.length, 'sibling hash', 'sibling hashes')} and nothing else from the set.`
+            : result.contentHash !== entry.contentHash
+              ? `${file.path} is not the file sealed as ${entry.path}: its content hash differs from the sealed one.`
+              : 'The file matches the sealed content hash, but its proof does not lead to this root.'),
+          h('span', { class: 'banner-meta' }, 'Signed by: ', signedBy(sig),
+            !fromProof && ' · checked against the root you entered, not the one in the proof'))),
       await proofCard({ title: 'The check, step by step', path: entry.path, contentHash: result.contentHash, proof: entry.proof, root }));
   } catch (err) {
     if (run !== oneRun) return;
     status('one', '');
-    oneOut.replaceChildren(errorCard(err));
+    out.replaceChildren(errorCard(err));
   }
 }
+
+/* ---------- signing key ---------- */
+
+function renderKey() {
+  $('key-out').replaceChildren(
+    h('div', { class: 'card' }, h('h2', null, 'Active key'), signingPanel()),
+    h('div', { class: 'card' },
+      h('h2', null, 'How verifiers use it'),
+      h('ol', { class: 'plain-list' },
+        h('li', null, 'The signature covers the text ', h('code', null, 'merkle-seal v2 / root / created'), ', so the root and the sealing time cannot change without breaking it.'),
+        h('li', null, 'The public key travels inside the seal. Its fingerprint is recomputed from the key during verification, never read from the seal.'),
+        h('li', null, 'A valid signature proves which key signed. Publish your fingerprint somewhere people already trust, so they can tell the key is yours.'))));
+}
+renderKey();
 
 /* ---------- demo ---------- */
 
@@ -407,12 +361,14 @@ function demoFiles(overrides = {}) {
   });
 }
 
-function runDemoVerify(manifest) {
-  verifyState.entries = demoFiles({ 'data/report.csv': DEMO['data/report.csv'].replace('135500', '153500') });
-  setSlot('verify-files', 'demo files, with Q2 revenue in data/report.csv changed from 135500 to 153500', 'ok');
-  loadVerifySeal(manifest, 'demo seal');
-  showTab('verify');
+async function tamperDemo() {
+  const entries = demoFiles({ 'data/report.csv': DEMO['data/report.csv'].replace('135500', '153500') });
+  try { await verifyInto(session.manifest, entries, 'dash'); }
+  catch (err) { status('dash', err.message); }
 }
 
-// Open on a sealed demo set, so the first thing on screen is the tree, not an empty box.
-runSeal(demoFiles(), { demo: true });
+/* ---------- start ---------- */
+
+// Open on a sealed demo set, so the first thing on screen is the product, not an empty box.
+showView(location.hash.slice(1));
+runSeal(demoFiles(), { demo: true, navigate: false });

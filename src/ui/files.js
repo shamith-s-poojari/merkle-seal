@@ -9,7 +9,7 @@ const entryFor = (path, file) => ({ path, size: file.size, file, read: () => fil
 const keep = (list) => list.filter(e => !IGNORED.has(basename(e.path)));
 
 /** Files from an <input>. A folder pick is made relative to the folder itself. */
-function fromInput(input) {
+export function fromInput(input) {
   return keep([...input.files].map(f => {
     const rel = f.webkitRelativePath;
     return entryFor(rel ? rel.split('/').slice(1).join('/') : f.name, f);

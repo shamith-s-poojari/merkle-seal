@@ -14,7 +14,20 @@ analytics, no dependencies.
 
 ## What it does
 
-| Mode | Input | Output |
+The app is a dashboard for one seal at a time. The **dashboard** shows that seal and the
+latest verification against it:
+
+- KPI cards for the file count and hashing time, integrity (or changed files), proof size
+  and signature.
+- The Merkle tree, where picking a leaf or file highlights its proof path, with changed
+  paths in red.
+- A donut of file statuses.
+- A files table you can search and filter by status, where **View** opens a file's proof
+  step by step in a side drawer.
+
+The other views create or check seals:
+
+| View | Input | Output |
 |---|---|---|
 | **Seal** | files or a folder | the root, timing and proof-size stats, a tree view, and a `seal.json` with every file's hash and inclusion proof, optionally signed with ECDSA P-256; each file's proof can also be exported on its own |
 | **Verify** | `seal.json` plus the files as they are now | a verdict, every file marked `unchanged`, `modified`, `missing`, `not in seal` or `renamed`, the changed paths drawn in red on the tree, and who signed the seal |
@@ -167,8 +180,9 @@ src/sign.js          ECDSA P-256 keys, signing and signature checks
 src/attacks.js       the weakened trees and the two attacks, for the lab and the tests
 src/hash-pool.js     Web Worker pool for content hashing
 src/hash-worker.js   the worker
-src/app.js           wires the four panes together
-src/ui/              DOM helpers, file drops, tree drawing, attack lab, signing panel
+src/app.js           the session (current seal and verification), views and navigation
+src/ui/dashboard.js  KPI cards, tree panel, status donut, files table, proof drawer
+src/ui/              also: DOM helpers, icons, charts, file drops, tree drawing, attack lab, signing panel
 test/cases.js        test cases shared by both runners
 test/run.test.js     runs them under Node
 tests.html           runs them in the browser

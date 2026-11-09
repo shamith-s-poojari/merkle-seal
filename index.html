@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- No network access at all once the page has loaded: files cannot leave the browser. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
 <meta name="color-scheme" content="dark">
 <title>Merkle Seal</title>
 <meta name="description" content="Seal a set of files under one Merkle root, then see exactly which file changed, was added or was removed. Runs entirely in the browser.">
@@ -12,107 +12,173 @@
 <link rel="stylesheet" href="styles.css">
 <script type="module" src="src/app.js"></script>
 </head>
-<body>
+<body class="app">
 
-<header class="wrap top">
-  <a class="brand" href="./">merkle-seal</a>
-  <nav>
-    <a href="tests.html">tests</a>
-    <a href="https://github.com/shamith-s-poojari/merkle-seal">source</a>
-  </nav>
-</header>
+<div class="shell">
+  <aside class="side" id="side" aria-label="Navigation">
+    <a class="logo" href="./">
+      <img src="favicon.svg" alt="" width="30" height="30">
+      <span>Merkle <b>Seal</b></span>
+    </a>
 
-<main class="wrap">
-  <p class="prompt">merkle-seal --help</p>
-  <h1>Seal a set of files. Later, see exactly which one changed.</h1>
-  <p class="lede">
-    Every file becomes a leaf of a Merkle tree and one 32-byte root seals the set. Each file
-    carries its own inclusion proof, so verification pins a change to the file that caused it,
-    and the root can be signed to prove who sealed it.
-  </p>
-  <ul class="facts">
-    <li>SHA-256 + ECDSA P-256 via Web Crypto</li>
-    <li>domain-separated leaves and nodes</li>
-    <li>parallel hashing in Web Workers</li>
-    <li>no uploads: the page blocks all network requests</li>
-  </ul>
+    <nav class="nav">
+      <p class="nav-h">Overview</p>
+      <a href="#dashboard" data-view="dashboard"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>Dashboard</a>
 
-  <div class="tabs" role="tablist" aria-label="Mode">
-    <button role="tab" id="tab-seal" aria-controls="pane-seal" aria-selected="true">1 · seal</button>
-    <button role="tab" id="tab-verify" aria-controls="pane-verify" aria-selected="false" tabindex="-1">2 · verify</button>
-    <button role="tab" id="tab-one" aria-controls="pane-one" aria-selected="false" tabindex="-1">3 · one file</button>
-    <button role="tab" id="tab-lab" aria-controls="pane-lab" aria-selected="false" tabindex="-1">4 · attack lab</button>
+      <p class="nav-h">Workflows</p>
+      <a href="#seal" data-view="seal"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3"/></svg>Seal files</a>
+      <a href="#verify" data-view="verify"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6"/></svg>Verify a set</a>
+      <a href="#one" data-view="one"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7zM14 3v5h5"/></svg>Check one file</a>
+
+      <p class="nav-h">Security</p>
+      <a href="#lab" data-view="lab"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3M7.5 14h9"/></svg>Attack lab</a>
+      <a href="#key" data-view="key"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 14h9M17 14v3M21 14v3"/></svg>Signing key</a>
+
+      <p class="nav-h">Project</p>
+      <a href="tests.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l2 2 3-3M11 8h9M4 15l2 2 3-3M11 16h9"/></svg>Test suite</a>
+      <a href="https://github.com/shamith-s-poojari/merkle-seal"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg>Source code</a>
+    </nav>
+
+    <div class="side-card">
+      <span class="side-card-badge"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 12l2 2 4-4"/></svg></span>
+      <h3>Offline by design</h3>
+      <p>Files never leave this tab. The page's security policy blocks every network request.</p>
+      <a class="btn" href="tests.html">Run the test suite</a>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menu" aria-label="Open navigation" aria-controls="side" aria-expanded="false"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7M5 10v10h14V10"/></svg>
+        <span id="crumb-view">Dashboard</span><span class="crumb-sep">:</span><b id="crumb-title">Integrity overview</b>
+      </nav>
+      <label class="search">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4"/></svg>
+        <span class="sr">Search files</span>
+        <input id="search" type="search" placeholder="Search files" autocomplete="off" spellcheck="false">
+      </label>
+      <span class="chip" id="engine-chip" title="Where hashing runs"></span>
+      <button class="btn btn-solid" id="top-new"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>New seal</span></button>
+    </header>
+
+    <main class="views">
+      <!-- Dashboard: filled in by src/ui/dashboard.js -->
+      <section class="view" id="view-dashboard" aria-labelledby="crumb-title">
+        <p class="status" id="dash-status" aria-live="polite"></p>
+        <div id="dashboard"></div>
+      </section>
+
+      <section class="view" id="view-seal" hidden>
+        <div class="page-head">
+          <h1>Seal files</h1>
+          <p>Every file becomes a leaf of a Merkle tree and one 32-byte root seals the set. You get a <code>seal.json</code> with each file's hash and inclusion proof. Keep it somewhere the files themselves cannot reach.</p>
+        </div>
+        <div class="drop drop-big" data-drop="seal">
+          <span class="drop-icon"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/></svg></span>
+          <p class="drop-title">Drop files or a folder to seal</p>
+          <p class="drop-sub">or <button type="button" class="link" data-pick="seal-files">choose files</button> · <button type="button" class="link" data-pick="seal-folder">choose a folder</button> · <button type="button" class="link" id="demo">reseal the demo set</button></p>
+          <input type="file" id="seal-files" multiple hidden>
+          <input type="file" id="seal-folder" webkitdirectory hidden>
+        </div>
+        <p class="status" id="seal-status" aria-live="polite"></p>
+        <div id="seal-out"></div>
+      </section>
+
+      <section class="view" id="view-verify" hidden>
+        <div class="page-head">
+          <h1>Verify a set</h1>
+          <p>Load a seal, then drop the files as they are now. Each file is checked against its own inclusion proof, and the whole set is rebuilt and compared with the sealed root. Results open on the dashboard.</p>
+        </div>
+        <div class="slots">
+          <div class="drop" data-drop="verify-seal">
+            <span class="drop-icon"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7zM14 3v5h5"/></svg></span>
+            <p class="drop-title">seal.json</p>
+            <p class="drop-sub">drop it here or <button type="button" class="link" data-pick="verify-seal-file">choose</button></p>
+            <p class="slot-state" id="verify-seal-state"></p>
+            <input type="file" id="verify-seal-file" accept=".json,application/json" hidden>
+          </div>
+          <div class="drop" data-drop="verify-files">
+            <span class="drop-icon"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/></svg></span>
+            <p class="drop-title">The files now</p>
+            <p class="drop-sub">drop them or <button type="button" class="link" data-pick="verify-files-input">choose files</button> · <button type="button" class="link" data-pick="verify-folder">a folder</button></p>
+            <p class="slot-state" id="verify-files-state"></p>
+            <input type="file" id="verify-files-input" multiple hidden>
+            <input type="file" id="verify-folder" webkitdirectory hidden>
+          </div>
+        </div>
+        <p class="status" id="verify-status" aria-live="polite"></p>
+        <div id="verify-out"></div>
+      </section>
+
+      <section class="view" id="view-one" hidden>
+        <div class="page-head">
+          <h1>Check one file</h1>
+          <p>Check a single file without the rest of the set: its bytes, its inclusion proof and a root you trust are enough. The proof can be a <code>.proof.json</code> exported from a seal, or the whole <code>seal.json</code>.</p>
+        </div>
+        <div class="slots">
+          <div class="drop" data-drop="one-proof">
+            <span class="drop-icon"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3h4v4h-4zM3 17h4v4H3zM17 17h4v4h-4zM12 7v5M5 17v-5h14v5"/></svg></span>
+            <p class="drop-title">Proof or seal</p>
+            <p class="drop-sub">drop it here or <button type="button" class="link" data-pick="one-proof-file">choose</button></p>
+            <p class="slot-state" id="one-proof-state"></p>
+            <input type="file" id="one-proof-file" accept=".json,application/json" hidden>
+          </div>
+          <div class="drop" data-drop="one-file">
+            <span class="drop-icon"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7zM14 3v5h5"/></svg></span>
+            <p class="drop-title">The file</p>
+            <p class="drop-sub">drop it here or <button type="button" class="link" data-pick="one-file-input">choose</button></p>
+            <p class="slot-state" id="one-file-state"></p>
+            <input type="file" id="one-file-input" hidden>
+          </div>
+        </div>
+        <label class="field" id="one-pick-wrap" hidden>
+          <span>Which sealed file this is</span>
+          <select id="one-pick"></select>
+        </label>
+        <label class="field">
+          <span>Root you trust (filled from the proof; paste a published root to check against that instead)</span>
+          <input id="one-root" spellcheck="false" autocomplete="off" placeholder="64 hex characters">
+        </label>
+        <p class="status" id="one-status" aria-live="polite"></p>
+        <div id="one-out"></div>
+      </section>
+
+      <section class="view" id="view-lab" hidden>
+        <div class="page-head">
+          <h1>Attack lab</h1>
+          <p>Two well-known ways to forge a Merkle root. Each one runs for real in your browser, first against a deliberately weakened tree and then against the tree Merkle Seal uses. Switch the defence on and off to compare.</p>
+        </div>
+        <div id="lab-out"></div>
+      </section>
+
+      <section class="view" id="view-key" hidden>
+        <div class="page-head">
+          <h1>Signing key</h1>
+          <p>A root proves the files have not changed, not who sealed them. Signing it with an ECDSA P-256 key adds that. Seals you make in this tab are signed with the active key, and verifiers see its fingerprint.</p>
+        </div>
+        <div id="key-out"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      Built by <a href="https://shamith-s-poojari.github.io">Shamith S Poojari</a> · SHA-256 and ECDSA through Web Crypto · no dependencies · MIT
+    </footer>
   </div>
+</div>
 
-  <section id="pane-seal" role="tabpanel" aria-labelledby="tab-seal">
-    <div class="drop drop-compact" data-drop="seal">
-      <p class="drop-title">Drop files or a folder to seal</p>
-      <p class="drop-sub">or <button type="button" class="link" data-pick="seal-files">choose files</button> · <button type="button" class="link" data-pick="seal-folder">choose a folder</button> · <button type="button" class="link" id="demo">reseal the demo</button></p>
-      <input type="file" id="seal-files" multiple hidden>
-      <input type="file" id="seal-folder" webkitdirectory hidden>
-    </div>
-    <p class="status" id="seal-status" aria-live="polite"></p>
-    <div id="seal-out"></div>
-  </section>
-
-  <section id="pane-verify" role="tabpanel" aria-labelledby="tab-verify" hidden>
-    <p class="pane-intro">Load a seal, then drop the files as they are now. Each file is checked against its own proof, and the set is rebuilt and compared with the sealed root.</p>
-    <div class="slots">
-      <div class="drop" data-drop="verify-seal">
-        <p class="drop-title">seal.json</p>
-        <p class="drop-sub">drop it here or <button type="button" class="link" data-pick="verify-seal-file">choose</button></p>
-        <p class="slot-state" id="verify-seal-state"></p>
-        <input type="file" id="verify-seal-file" accept=".json,application/json" hidden>
-      </div>
-      <div class="drop" data-drop="verify-files">
-        <p class="drop-title">the files now</p>
-        <p class="drop-sub">drop them or <button type="button" class="link" data-pick="verify-files-input">choose files</button> · <button type="button" class="link" data-pick="verify-folder">a folder</button></p>
-        <p class="slot-state" id="verify-files-state"></p>
-        <input type="file" id="verify-files-input" multiple hidden>
-        <input type="file" id="verify-folder" webkitdirectory hidden>
-      </div>
-    </div>
-    <p class="status" id="verify-status" aria-live="polite"></p>
-    <div id="verify-out"></div>
-  </section>
-
-  <section id="pane-one" role="tabpanel" aria-labelledby="tab-one" hidden>
-    <p class="pane-intro">Check a single file without the rest of the set: its bytes, its inclusion proof and a root you trust are enough. The proof can be a <code>.proof.json</code> exported from a seal, or the whole <code>seal.json</code>.</p>
-    <div class="slots">
-      <div class="drop" data-drop="one-proof">
-        <p class="drop-title">proof or seal</p>
-        <p class="drop-sub">drop it here or <button type="button" class="link" data-pick="one-proof-file">choose</button></p>
-        <p class="slot-state" id="one-proof-state"></p>
-        <input type="file" id="one-proof-file" accept=".json,application/json" hidden>
-      </div>
-      <div class="drop" data-drop="one-file">
-        <p class="drop-title">the file</p>
-        <p class="drop-sub">drop it here or <button type="button" class="link" data-pick="one-file-input">choose</button></p>
-        <p class="slot-state" id="one-file-state"></p>
-        <input type="file" id="one-file-input" hidden>
-      </div>
-    </div>
-    <label class="field" id="one-pick-wrap" hidden>
-      <span>which sealed file this is</span>
-      <select id="one-pick"></select>
-    </label>
-    <label class="field">
-      <span>root you trust (filled from the proof; paste a published root to check against that instead)</span>
-      <input id="one-root" spellcheck="false" autocomplete="off" placeholder="64 hex characters">
-    </label>
-    <p class="status" id="one-status" aria-live="polite"></p>
-    <div id="one-out"></div>
-  </section>
-
-  <section id="pane-lab" role="tabpanel" aria-labelledby="tab-lab" hidden>
-    <p class="pane-intro">Two well-known ways to forge a Merkle root. Each one runs for real in your browser, first against a deliberately weakened tree and then against the tree Merkle Seal uses. Switch the defence on and off to compare.</p>
-    <div id="lab-out"></div>
-  </section>
-</main>
-
-<footer class="wrap">
-  Built by <a href="https://shamith-s-poojari.github.io">Shamith S Poojari</a>. SHA-256 through the Web Crypto API, no dependencies, MIT licensed.
-</footer>
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer-scrim" data-close></div>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">
+    <header class="drawer-head">
+      <h2 id="drawer-title">Inclusion proof</h2>
+      <button class="icon-btn" data-close aria-label="Close"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </header>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+</div>
 
 </body>
 </html>
